@@ -14,6 +14,9 @@ class UEnhancedInputLocalPlayerSubsystem;
 class AATool;
 class ASprayTool;
 class AWiperTool;
+class AWindow;
+class APlayerController;
+class UWindowCleaningHUD;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FUpdateSprintMeterDelegate, float, Percentage);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FSprintStateChangedDelegate, bool, bSprinting);
@@ -74,10 +77,32 @@ protected:
 	UPROPERTY()
 	TObjectPtr<UInputAction> UseToolAction;
 
+	UPROPERTY()
+	TObjectPtr<UInputAction> InteractAction;
+
 	UPROPERTY(Transient)
 	TObjectPtr<UInputMappingContext> ToolMappingContext;
 
 	TWeakObjectPtr<UEnhancedInputLocalPlayerSubsystem> ToolInputSubsystem;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Interaction", meta = (ClampMin = "1.0", Units = "cm"))
+	float InteractionDistance = 350.0f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Interaction|Input")
+	FKey InteractKey = EKeys::E;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Window")
+	TObjectPtr<AWindow> ActiveWindow;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UWindowCleaningHUD> CleaningHUD;
+
+	TWeakObjectPtr<APlayerController> CleaningController;
+	TWeakObjectPtr<AActor> PreviousViewTarget;
+	bool bPreviousShowMouseCursor = false;
+	bool bToolHeld = false;
+	bool bHasPreviousBrushPoint = false;
+	FVector2D PreviousBrushPoint = FVector2D::ZeroVector;
 
 	/** If true, we're sprinting */
 	bool bSprinting = false;
@@ -132,6 +157,15 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Tools")
 	void UseSelectedTool();
 
+	UFUNCTION(BlueprintCallable, Category = "Window")
+	void InteractWithWindow();
+
+	UFUNCTION(BlueprintCallable, Category = "Window")
+	void ExitWindowCleaning();
+
+	UFUNCTION(BlueprintPure, Category = "Window")
+	bool IsCleaningWindow() const;
+
 	AATool* GetSelectedTool() const { return SelectedTool; }
 	ASprayTool* GetSprayTool() const { return SprayTool; }
 	AWiperTool* GetWiperTool() const { return WiperTool; }
@@ -149,12 +183,16 @@ protected:
 
 	/** Set up input action bindings */
 	virtual void SetupPlayerInputComponent(UInputComponent* InputComponent) override;
+	virtual void Tick(float DeltaSeconds) override;
 	virtual void PawnClientRestart() override;
 	virtual void UnPossessed() override;
+	virtual void DoJumpStart() override;
 
 	void CreateToolMappingContext();
 	void RemoveToolMappingContext();
 	void SelectTool(AATool* Tool);
+	void ReleaseSelectedTool();
+	void UpdateWindowBrush();
 
 protected:
 

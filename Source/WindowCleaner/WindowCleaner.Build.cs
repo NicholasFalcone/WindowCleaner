@@ -15,10 +15,15 @@ public class WindowCleaner : ModuleRules
 			"InputCore",
 			"EnhancedInput",
 			"UMG",
-			"Slate"
+			"Slate",
+			"SlateCore"
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[] { });
+		if (Target.bBuildEditor)
+		{
+			PrivateDependencyModuleNames.Add("UnrealEd");
+		}
 
 		PublicIncludePaths.AddRange(new string[] {
 			"WindowCleaner",

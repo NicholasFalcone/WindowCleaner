@@ -13,8 +13,11 @@
 #include "GameFramework/PlayerController.h"
 #include "InputAction.h"
 #include "InputMappingContext.h"
+#include "Blueprint/UserWidget.h"
 #include "SprayTool.h"
 #include "WiperTool.h"
+#include "Window.h"
+#include "WindowCleaningHUD.h"
 #include "WindowCleaner.h"
 
 AHorrorCharacter::AHorrorCharacter()
@@ -24,6 +27,7 @@ AHorrorCharacter::AHorrorCharacter()
 	SelectSprayAction = CreateDefaultSubobject<UInputAction>(TEXT("SelectSprayAction"));
 	SelectWiperAction = CreateDefaultSubobject<UInputAction>(TEXT("SelectWiperAction"));
 	UseToolAction = CreateDefaultSubobject<UInputAction>(TEXT("UseToolAction"));
+	InteractAction = CreateDefaultSubobject<UInputAction>(TEXT("InteractAction"));
 
 	// create the spotlight
 	SpotLight = CreateDefaultSubobject<USpotLightComponent>(TEXT("SpotLight"));
@@ -80,6 +84,7 @@ void AHorrorCharacter::BeginPlay()
 
 void AHorrorCharacter::EndPlay(EEndPlayReason::Type EndPlayReason)
 {
+	ExitWindowCleaning();
 	RemoveToolMappingContext();
 	if (IsValid(SprayTool))
 	{
@@ -110,6 +115,9 @@ void AHorrorCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCom
 			EnhancedInputComponent->BindAction(SelectSprayAction, ETriggerEvent::Started, this, &AHorrorCharacter::SelectSprayTool);
 			EnhancedInputComponent->BindAction(SelectWiperAction, ETriggerEvent::Started, this, &AHorrorCharacter::SelectWiperTool);
 			EnhancedInputComponent->BindAction(UseToolAction, ETriggerEvent::Started, this, &AHorrorCharacter::UseSelectedTool);
+			EnhancedInputComponent->BindAction(UseToolAction, ETriggerEvent::Completed, this, &AHorrorCharacter::ReleaseSelectedTool);
+			EnhancedInputComponent->BindAction(UseToolAction, ETriggerEvent::Canceled, this, &AHorrorCharacter::ReleaseSelectedTool);
+			EnhancedInputComponent->BindAction(InteractAction, ETriggerEvent::Started, this, &AHorrorCharacter::InteractWithWindow);
 
 		}
 	}
@@ -145,11 +153,13 @@ void AHorrorCharacter::CreateToolMappingContext()
 		ToolMappingContext->MapKey(SelectSprayAction, SelectSprayKey);
 		ToolMappingContext->MapKey(SelectWiperAction, SelectWiperKey);
 		ToolMappingContext->MapKey(UseToolAction, UseToolKey);
+		ToolMappingContext->MapKey(InteractAction, InteractKey);
 	}
 }
 
 void AHorrorCharacter::UnPossessed()
 {
+	ExitWindowCleaning();
 	RemoveToolMappingContext();
 	Super::UnPossessed();
 }
@@ -180,6 +190,7 @@ void AHorrorCharacter::SelectTool(AATool* Tool)
 		SelectedTool->OnUnequipped();
 	}
 	SelectedTool = Tool;
+	bHasPreviousBrushPoint = false;
 }
 
 void AHorrorCharacter::SelectSprayTool()
@@ -197,6 +208,164 @@ void AHorrorCharacter::UseSelectedTool()
 	if (IsValid(SelectedTool) && SelectedTool->bIsEquipped)
 	{
 		SelectedTool->OnUsed();
+		if (IsValid(ActiveWindow))
+		{
+			bToolHeld = true;
+			bHasPreviousBrushPoint = false;
+			UpdateWindowBrush();
+		}
+	}
+}
+
+void AHorrorCharacter::ReleaseSelectedTool()
+{
+	bToolHeld = false;
+	bHasPreviousBrushPoint = false;
+}
+
+void AHorrorCharacter::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+	if (bToolHeld && IsValid(ActiveWindow))
+	{
+		UpdateWindowBrush();
+	}
+}
+
+void AHorrorCharacter::UpdateWindowBrush()
+{
+	APlayerController* PC = CleaningController.Get();
+	if (!PC || !IsValid(ActiveWindow) || !IsValid(SelectedTool) || !SelectedTool->bIsEquipped)
+	{
+		bHasPreviousBrushPoint = false;
+		return;
+	}
+	FVector Origin;
+	FVector Direction;
+	FVector2D Point;
+	if (!PC->DeprojectMousePositionToWorld(Origin, Direction) || !ActiveWindow->ProjectRayToSurface(Origin, Direction, Point))
+	{
+		bHasPreviousBrushPoint = false;
+		return;
+	}
+	const bool bSpray = SelectedTool == SprayTool;
+	if (bSpray || SelectedTool == WiperTool)
+	{
+		ActiveWindow->ApplyBrush(bHasPreviousBrushPoint ? PreviousBrushPoint : Point, Point, bSpray);
+		PreviousBrushPoint = Point;
+		bHasPreviousBrushPoint = true;
+	}
+}
+
+void AHorrorCharacter::InteractWithWindow()
+{
+	if (IsValid(ActiveWindow))
+	{
+		ExitWindowCleaning();
+		return;
+	}
+
+	APlayerController* PC = Cast<APlayerController>(GetController());
+	UCameraComponent* Camera = GetFirstPersonCameraComponent();
+	if (!PC || !PC->IsLocalController() || !Camera || !GetWorld())
+	{
+		return;
+	}
+	FHitResult Hit;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(WindowInteraction), false, this);
+	if (IsValid(SprayTool))
+	{
+		Params.AddIgnoredActor(SprayTool);
+	}
+	if (IsValid(WiperTool))
+	{
+		Params.AddIgnoredActor(WiperTool);
+	}
+	const FVector Start = Camera->GetComponentLocation();
+	if (!GetWorld()->LineTraceSingleByChannel(Hit, Start, Start + Camera->GetForwardVector() * InteractionDistance, ECC_Visibility, Params))
+	{
+		return;
+	}
+	AWindow* Window = Cast<AWindow>(Hit.GetActor());
+	if (!IsValid(Window) || !Window->BeginCleaning(this))
+	{
+		return;
+	}
+	if (!IsValid(Window))
+	{
+		return;
+	}
+
+	ActiveWindow = Window;
+	CleaningController = PC;
+	PreviousViewTarget = PC->GetViewTarget();
+	bPreviousShowMouseCursor = PC->bShowMouseCursor;
+	PC->SetIgnoreMoveInput(true);
+	PC->SetIgnoreLookInput(true);
+	GetCharacterMovement()->StopMovementImmediately();
+	PC->SetViewTargetWithBlend(Window, 0.2f);
+	PC->bShowMouseCursor = true;
+	FInputModeGameAndUI InputMode;
+	InputMode.SetHideCursorDuringCapture(false);
+	InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+	PC->SetInputMode(InputMode);
+
+	int32 ViewportWidth = 0;
+	int32 ViewportHeight = 0;
+	PC->GetViewportSize(ViewportWidth, ViewportHeight);
+	if (ViewportWidth > 0 && ViewportHeight > 0)
+	{
+		PC->SetMouseLocation(ViewportWidth / 2, ViewportHeight / 2);
+	}
+
+	CleaningHUD = CreateWidget<UWindowCleaningHUD>(PC, UWindowCleaningHUD::StaticClass());
+	if (CleaningHUD)
+	{
+		CleaningHUD->SetWindow(Window);
+		CleaningHUD->SetVisibility(ESlateVisibility::HitTestInvisible);
+		CleaningHUD->AddToPlayerScreen();
+	}
+	else
+	{
+		UE_LOG(LogWindowCleaner, Error, TEXT("Could not create window cleaning HUD for %s"), *GetName());
+	}
+}
+
+bool AHorrorCharacter::IsCleaningWindow() const
+{
+	return IsValid(ActiveWindow);
+}
+
+void AHorrorCharacter::ExitWindowCleaning()
+{
+	ReleaseSelectedTool();
+	if (CleaningHUD)
+	{
+		CleaningHUD->RemoveFromParent();
+		CleaningHUD = nullptr;
+	}
+	if (APlayerController* PC = CleaningController.Get())
+	{
+		PC->SetViewTargetWithBlend(PreviousViewTarget.IsValid() ? PreviousViewTarget.Get() : this, 0.2f);
+		PC->SetIgnoreMoveInput(false);
+		PC->SetIgnoreLookInput(false);
+		PC->bShowMouseCursor = bPreviousShowMouseCursor;
+		PC->SetInputMode(FInputModeGameOnly());
+	}
+	CleaningController.Reset();
+	PreviousViewTarget.Reset();
+	if (IsValid(ActiveWindow))
+	{
+		ActiveWindow->EndCleaning(this);
+	}
+	ActiveWindow = nullptr;
+}
+
+void AHorrorCharacter::DoJumpStart()
+{
+	if (!IsValid(ActiveWindow))
+	{
+		Super::DoJumpStart();
 	}
 }
 
